@@ -1,0 +1,6 @@
+{
+	"Name": "Path Distance Heatmap",
+	"Author": "Jacob",
+	"Description": "Samples villager movement and shows walking-distance rings (50/100/150 m) around a selected building.",
+	"Version": "0.0.1"
+}
