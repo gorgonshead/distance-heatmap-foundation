@@ -5,8 +5,7 @@ local mod = ...
 --
 -- All markers are children of one container object, so clearing the overlay is
 -- one destroy, and a container captured by a save is found with one name
--- search on load. (Terrain dirt circles are not an option: they cannot be
--- removed once painted.) The state lives in a global that survives mod reloads,
+-- search on load.  The state lives in a global that survives mod reloads,
 -- so a reload can clear what the previous load created.
 
 local cfg = PathHeatmap.cfg

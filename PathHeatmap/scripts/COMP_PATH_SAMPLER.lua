@@ -23,7 +23,7 @@ local COMP_PATH_SAMPLER = {
 
 -- Sampling ---------------------------------------------------------------------
 -- One sampler exists per level and only one level updates at a time, so the
--- per-cycle values live in upvalues; the callbacks are made once, not per frame.
+-- per-cycle values live in upvalues; the callbacks are made once.
 
 local addSample = grid.addSample
 local sampleWeight, sampledCount = 0, 0

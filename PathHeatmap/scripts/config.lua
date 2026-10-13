@@ -3,12 +3,7 @@ local mod = ...
 -- Every tunable in one place. Scripts copy these into locals when they load,
 -- so a change needs a mod reload (Ctrl+Shift+R) or a save reload.
 --
--- Per-frame budgets are counted in units of work, not milliseconds: the Lua
--- sandbox has no clock. The game's Lua measured about 2-3 times slower than
--- plain Lua 5.1 run outside it: 3,000 search steps added 25-75 ms to a frame in
--- a 500-person village. The budgets below aim at a few milliseconds per frame
--- there. With DEBUG on, slow frames are logged together with the work done in
--- the frame before, to check them in the game.
+-- Per-frame budgets are counted in units of work.
 PathHeatmap.cfg = {
 	-- Per-selection, per-job and slow-frame log lines.
 	DEBUG = false,
@@ -18,9 +13,7 @@ PathHeatmap.cfg = {
 
 	-- Sampling --------------------------------------------------------------
 	-- Component types that represent walking people. Types that do not resolve
-	-- in this game version are dropped at level start. COMP_GUEST is left out:
-	-- in a 500-person village all 61 guests were also listed as villagers or
-	-- visitors, so their steps counted twice.
+	-- in this game version are dropped at level start.
 	AGENT_TYPES = { "COMP_VILLAGER", "COMP_VISITOR" },
 	-- Game seconds between position samples. Each sample adds the elapsed time
 	-- as weight, so the total does not depend on this. At walking pace an agent
