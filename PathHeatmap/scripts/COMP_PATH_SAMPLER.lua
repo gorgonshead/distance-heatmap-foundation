@@ -47,6 +47,15 @@ end
 -- ("door", "gate") also catch door model parts and attach nodes: a tax office
 -- reported 31 "entrances" that way, and has two. No child carries the
 -- engine's COMP_ENTRANCE_LOCATION, so the name is the only handle.
+--
+-- Checked in game and ruled out or kept for later:
+-- - The part asset's BUILDING_PATH_DATA (EntranceList, WaypointPositionList) is
+--   not readable from Lua: AssetBuilding.AssetCoreBuildingPart has no
+--   BuildingPath field, and placed parts expose no asset.
+-- - level:find(ENTRANCE_NAME, {}) fills a plain table with every indicator in
+--   the level (932 in a 500-person village) in one call.
+-- - Indicators sit directly under a part object (two levels below the
+--   building), or five levels down in houses.
 local ENTRANCE_NAME = "Building Entrance Indicator"
 
 -- Events after which a building's entrances may have moved.
@@ -55,31 +64,12 @@ local BUILDING_CHANGE_EVENTS = {
 	"ON_UPGRADING", "ON_BUILDING_COMPLETED",
 }
 
--- Debug only: the chain of parents from an indicator up to the building, to
--- learn where indicators sit in the tree.
-local pathsLogged = 0
-local function logEntrancePath(indicator, owner)
-	local names, node, depth = { ENTRANCE_NAME }, indicator, 0
-	local ownerName = tostring(owner.Name)
-	while depth < 10 do
-		local ok, parent = pcall(node.getParent, node)
-		if not ok or not parent then break end
-		depth = depth + 1
-		local name = tostring(parent.Name)
-		names[#names + 1] = name
-		if name == ownerName then break end
-		node = parent
-	end
-	trace(string.format("entrance path (%d levels below %s): %s", depth, ownerName, table.concat(names, " < ")))
-end
-
 -- Walks the whole object tree under the building. Costs one engine call per
 -- child object, which is thousands on a large building.
 local function walkEntrances(building)
 	local owner = building:getOwner()
 	local origin = owner:getGlobalPosition()
 	local points, children = {}, 0
-	local logPath = DEBUG and pathsLogged < 6
 	local ok, err = pcall(owner.forEachChildRecursive, owner, function(child)
 		children = children + 1
 		if string.sub(tostring(child.Name), 1, #ENTRANCE_NAME) == ENTRANCE_NAME then
@@ -89,11 +79,6 @@ local function walkEntrances(building)
 				if math.abs(q.x - p.x) < 0.25 and math.abs(q.z - p.z) < 0.25 then return end
 			end
 			points[#points + 1] = { x = p.x, z = p.z, radius = cfg.ENTRANCE_RADIUS }
-			if logPath then
-				logPath = false
-				pathsLogged = pathsLogged + 1
-				logEntrancePath(child, owner)
-			end
 		end
 	end)
 	if not ok then mod:logWarning("child walk failed: " .. tostring(err)) end
@@ -101,80 +86,6 @@ local function walkEntrances(building)
 		points[1] = { x = origin.x, z = origin.z, radius = cfg.SEED_RADIUS }
 	end
 	return points, children
-end
-
--- Debug only, once: whether level:find accepts a plain table as its out list,
--- and how many indicators the level holds. Decides whether a level-wide lookup
--- could replace the tree walk.
-local function probeFind(level)
-	local out = {}
-	local ok, err = pcall(level.find, level, ENTRANCE_NAME, out)
-	local count = 0
-	for _ in pairs(out) do count = count + 1 end
-	trace(string.format("level:find probe: %s, %d indicators returned",
-		ok and "call accepted" or ("failed: " .. tostring(err)), count))
-end
-
--- Debug only, once: whether the entrance list in the building part asset can be
--- read from Lua. BUILDING_PATH_DATA holds an EntranceList (WaypointId, Hidden,
--- Water) indexing a WaypointPositionList; the game data stores it in each
--- BUILDING_PART asset, apparently as "BuildingPath", which the documentation
--- does not list. Also checks whether a placed part leads back to its asset.
-local function field(obj, name)
-	local ok, v = pcall(function() return obj[name] end)
-	if ok then return v end
-end
-
-local function describe(v)
-	if v == nil then return "nil" end
-	local ok, len = pcall(function() return #v end)
-	return type(v) .. ((ok and type(len) == "number") and (" of " .. len) or "")
-end
-
-local function probePathData(building)
-	local out = {}
-	local asset = field(building, "AssetBuilding")
-	out[#out + 1] = "AssetBuilding " .. describe(asset)
-	local core = asset and field(asset, "AssetCoreBuildingPart")
-	out[#out + 1] = "AssetCoreBuildingPart " .. describe(core)
-	if core then
-		for _, name in ipairs({ "BuildingPath", "PathData", "BuildingPathData" }) do
-			local data = field(core, name)
-			out[#out + 1] = name .. " " .. describe(data)
-			if data then
-				local entrances = field(data, "EntranceList")
-				local waypoints = field(data, "WaypointPositionList")
-				out[#out + 1] = "EntranceList " .. describe(entrances)
-				out[#out + 1] = "WaypointPositionList " .. describe(waypoints)
-				pcall(function()
-					entrances:forEach(function(e)
-						out[#out + 1] = string.format("entrance at waypoint %s, hidden %s, water %s",
-							tostring(field(e, "WaypointId")), tostring(field(e, "Hidden")), tostring(field(e, "Water")))
-					end)
-				end)
-				local i = 0
-				pcall(function()
-					waypoints:forEach(function(p)
-						i = i + 1
-						if i <= 4 then out[#out + 1] = string.format("waypoint %d (%.1f, %.1f, %.1f)", i, p.x, p.y, p.z) end
-					end)
-				end)
-				break
-			end
-		end
-	end
-	local ok, parts = pcall(building.getBuildingPartList, building)
-	if ok and parts then
-		out[#out + 1] = "parts " .. describe(parts)
-		local first
-		pcall(function() parts:forEach(function(p) if not first then first = p end end) end)
-		if first then
-			for _, name in ipairs({ "AssetBuildingPart", "BuildingPart", "Asset" }) do
-				out[#out + 1] = "part." .. name .. " " .. describe(field(first, name))
-			end
-		end
-	end
-	trace("path data probe: " .. table.concat(out, "; "))
 end
 
 -- Lifecycle ------------------------------------------------------------------------
@@ -263,6 +174,10 @@ end
 -- Selection ------------------------------------------------------------------------
 
 function COMP_PATH_SAMPLER:onHighlight(building, isHighlighted)
+	if isHighlighted and DEBUG then
+		self._timeline = { name = tostring(building:getOwner().Name), frames = {} }
+	end
+	if not cfg.OVERLAY then return end
 	if isHighlighted then
 		if PathHeatmap.selected ~= building then
 			-- A different building: drop everything shown or in progress.
@@ -278,12 +193,6 @@ function COMP_PATH_SAMPLER:onHighlight(building, isHighlighted)
 			points, children = walkEntrances(building)
 			self._entrances[building] = points
 			self:note("select", children .. " children")
-			if DEBUG and not self._probed then
-				self._probed = true
-				probeFind(self._level)
-				local okProbe, err = pcall(probePathData, building)
-				if not okProbe then trace("path data probe failed: " .. tostring(err)) end
-			end
 		end
 		trace(string.format("selected %s, %d start points", tostring(building:getOwner().Name), #points))
 		self._startPoints = points
@@ -431,30 +340,50 @@ end
 -- Debug profiling ------------------------------------------------------------------
 -- There is no clock, but the frame delta read at the start of an update is the
 -- length of the frame before. Work is noted by kind as it happens and charged
--- with that length on the next update. Frames with no work give the baseline;
--- frames with exactly one kind give that kind's average extra cost. Selection
--- work runs in an event handler, outside the update; it is charged to the frame
--- of the next update, which assumes input is handled before components update.
+-- with that length at the start of the next update. Frames with no work give
+-- the baseline; frames with exactly one kind give that kind's average extra
+-- cost. Selection work runs in an event handler, outside the update, and the
+-- engine's order is unknown, so each click also logs a timeline of the frames
+-- around it.
 
 function COMP_PATH_SAMPLER:note(kind, detail)
 	if not DEBUG then return end
 	local work = self._work
 	work.kinds[#work.kinds + 1] = kind
-	if detail then work.details[#work.details + 1] = kind .. " (" .. detail .. ")" end
+	if detail then work.details[kind] = detail end
+end
+
+local function label(work)
+	local parts = {}
+	for _, kind in ipairs(work.kinds) do
+		local detail = work.details[kind]
+		parts[#parts + 1] = detail and (kind .. " (" .. detail .. ")") or kind
+	end
+	return table.concat(parts, ", ")
 end
 
 function COMP_PATH_SAMPLER:chargeLastFrame()
 	local frameMs = self._level:getUnscaledDeltaTime() * 1000
-	local work = self._charged
-	self._charged, self._work = self._work, { kinds = {}, details = {} }
-	if not work then return end
-
+	local work = self._work
+	self._work = { kinds = {}, details = {} }
 	local kinds = work.kinds
+	local baseline = self._baseline
+
+	local timeline = self._timeline
+	if timeline then
+		local frames = timeline.frames
+		frames[#frames + 1] = string.format("%.0f", frameMs) .. (#kinds > 0 and (" [" .. label(work) .. "]") or "")
+		if #frames >= 8 then
+			trace(string.format("frames after selecting %s (baseline %.0f ms): %s",
+				timeline.name, baseline or 0, table.concat(frames, ", ")))
+			self._timeline = nil
+		end
+	end
+
 	if #kinds == 0 then
-		self._baseline = self._baseline and (self._baseline * 0.95 + frameMs * 0.05) or frameMs
+		self._baseline = baseline and (baseline * 0.95 + frameMs * 0.05) or frameMs
 		return
 	end
-	local baseline = self._baseline
 	if not baseline then return end
 	if #kinds == 1 then
 		local cost = self._costs[kinds[1]] or { sum = 0, count = 0, worst = 0 }
@@ -463,17 +392,8 @@ function COMP_PATH_SAMPLER:chargeLastFrame()
 		cost.sum, cost.count = cost.sum + extra, cost.count + 1
 		if extra > cost.worst then cost.worst = extra end
 	end
-	if frameMs > baseline * 1.5 + 4 then
-		local label = #work.details > 0 and table.concat(work.details, ", ") or table.concat(kinds, ", ")
-		if #work.details > 0 then
-			-- Kinds without a detail still belong in the label.
-			local seen = {}
-			for _, d in ipairs(work.details) do seen[string.match(d, "^[^(]+")] = true end
-			for _, k in ipairs(kinds) do
-				if not seen[k .. " "] then label = label .. ", " .. k end
-			end
-		end
-		trace(string.format("slow frame %.1f ms (baseline %.1f) after: %s", frameMs, baseline, label))
+	if frameMs > baseline * 1.5 + 4 and not timeline then
+		trace(string.format("slow frame %.1f ms (baseline %.1f) after: %s", frameMs, baseline, label(work)))
 	end
 end
 

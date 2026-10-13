@@ -12,6 +12,9 @@ local mod = ...
 PathHeatmap.cfg = {
 	-- Per-selection, per-job and slow-frame log lines.
 	DEBUG = false,
+	-- false: watch selections (and time them, with DEBUG) without drawing an
+	-- overlay, to measure what selecting a building costs the game itself.
+	OVERLAY = true,
 
 	-- Sampling --------------------------------------------------------------
 	-- Component types that represent walking people. Types that do not resolve

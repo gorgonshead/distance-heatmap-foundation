@@ -554,24 +554,41 @@ test("sampler: entrances are remembered until the building changes", function()
 	assert(#mod.errors == 0, table.concat(mod.errors, ";"))
 end)
 
-test("sampler: probes and cost summary run without errors", function()
+test("sampler: a frame's length is charged to the work done in it", function()
+	local level = fake.newLevel()
+	local comp, mod = newSampler(level)
+	level.dt, level.unscaled = 0.05, 0.020
+	frames(comp, 100) -- baseline near 20 ms
+	comp:note("test") -- as an event handler after an update would
+	level.unscaled = 0.120 -- that frame took 120 ms
+	comp:update()
+	level.unscaled = 0.020
+	frames(comp, 5)
+	local cost = comp._costs.test
+	assert(cost and cost.count == 1, "charged once")
+	near(cost.sum, 100, 1, "extra cost")
+end)
+
+test("sampler: selection timeline, and OVERLAY off skips the overlay", function()
 	local level = fake.newLevel()
 	local building = fake.newBuilding(level, 50, 10, 50, { { 3, 0 } })
 	local comp, mod = newSampler(level)
-	fake.newAgent(level, "COMP_VILLAGER", 50, 10, 50)
+	PathHeatmap.cfg.OVERLAY = false
 	walk(line(25, 25, 60, 25))
 	level.dt = 0.05
 	frames(comp, 50)
 	fake.fire(building.ON_BUILDING_SELECTED_HIGHLIGHT_CHANGED, true)
 	frames(comp, 400)
-	local probes, costs = 0, 0
+	local timelines, costs = 0, 0
 	for _, line in ipairs(mod.logs) do
-		if string.find(line, "probe", 1, true) then probes = probes + 1 end
+		if string.find(line, "frames after selecting", 1, true) then timelines = timelines + 1 end
 		if string.find(line, "extra frame cost", 1, true) then costs = costs + 1 end
 	end
-	assert(probes == 2, "both probes logged: " .. probes)
+	assert(timelines == 1, "timeline logged: " .. timelines)
 	assert(costs > 0, "cost summary logged")
+	assert(PathHeatmap.selected == nil and PathHeatmap.overlay.markerCount() == 0, "no overlay")
 	assert(#mod.errors == 0 and #mod.warnings == 0, table.concat(mod.errors, ";") .. table.concat(mod.warnings, ";"))
+	PathHeatmap.cfg.OVERLAY = true
 end)
 
 test("sampler: missing agent types are skipped", function()
