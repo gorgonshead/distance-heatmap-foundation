@@ -1,219 +1,343 @@
 local mod = ...
 
--- Decaying walk-sample grid and walking-distance search.
+-- Decaying grid of where people have walked.
 --
--- Villager positions are binned into CELL-sized squares on the ground plane.
--- Each cell holds "seconds of presence", which halves every HALF_LIFE_DAYS so
--- old routes fade. A cell counts as walkable while its decayed weight stays
--- above ACTIVE_WEIGHT. Distance from a building is a Dijkstra search over
--- walkable cells, so it follows where people really walk, not straight lines.
+-- Positions are binned into CELL-sized squares on the ground plane. Each cell
+-- holds seconds of presence that halve every half-life, so old routes fade.
+--
+-- Decay is applied without touching cells: a weight is stored multiplied by
+-- gain = 2^((t - epoch) / halfLife) for the time t it was written. Reading at
+-- time now divides by the gain at now. Adding, capping and the walkable test
+-- then need no power function per cell, only the one gain per frame. The gain
+-- grows without bound, so prune() occasionally rebases every cell onto a new
+-- epoch.
 
-local CELL = 2.0
--- Decay tuning. A villager crossing a cell adds about 1.3 s of presence, so with
--- these values one crossing keeps a cell walkable for about 7 game days, and a
--- cell pinned at MAX_WEIGHT by someone standing there fades after about 14. A
--- game day is 60 s here, so those are 7 and 14 minutes at normal speed. Raise
--- HALF_LIFE_DAYS if trails fragment, lower it if abandoned routes linger.
-local MAX_WEIGHT = 6        -- cap so idle workers do not pin a cell for long
-local ACTIVE_WEIGHT = 0.25  -- decayed weight needed to count as walkable
-local SEED_RADIUS = 12      -- default reach from a start point to a walked cell; entrances override it
-local MAX_DIST = 150
-local BANDS = { 50, 100, 150 }
-local HALF_LIFE_DAYS = 3
-local DIAG = CELL * 1.41421356
+local cfg = PathHeatmap.cfg
+local CELL = cfg.CELL
+local MAX_WEIGHT = cfg.MAX_WEIGHT
+local ACTIVE_WEIGHT = cfg.ACTIVE_WEIGHT
+local floor = math.floor
 
+-- A key packs two cell coordinates into one number: (cx + OFFSET) * STRIDE +
+-- (cz + OFFSET). Neighbouring keys differ by fixed amounts (dx * STRIDE + dz),
+-- which the search and planner use as precomputed offsets.
 local OFFSET, STRIDE = 50000, 100000
 
-local function cellOf(x, z)
-	return math.floor(x / CELL), math.floor(z / CELL)
-end
+local REBASE_ABOVE = 2 ^ 30 -- gain at which prune() rebases
 
-local function keyOf(cx, cz)
+local grid = {
+	weights = {}, -- key -> weight x gain at write time
+	heights = {}, -- key -> last height seen, for marker placement
+	epoch = 0,
+	halfLife = 300, -- game seconds; replaced from the day length at level start
+	now = 0,
+	gain = 1,
+	activeScaled = ACTIVE_WEIGHT, -- ACTIVE_WEIGHT x gain: the walkable test
+	capScaled = MAX_WEIGHT,
+	CELL = CELL,
+	STRIDE = STRIDE,
+}
+PathHeatmap.grid = grid
+
+function grid.keyOf(cx, cz)
 	return (cx + OFFSET) * STRIDE + (cz + OFFSET)
 end
 
-local function coordsOf(key)
-	return math.floor(key / STRIDE) - OFFSET, key % STRIDE - OFFSET
+function grid.coordsOf(key)
+	return floor(key / STRIDE) - OFFSET, key % STRIDE - OFFSET
 end
 
-PathHeatmap.weights = {}
-PathHeatmap.stamps = {}
-PathHeatmap.heights = {} -- last ground height seen per cell, for marker placement
-PathHeatmap.halfLife = 300 -- seconds; overwritten from the day length once known
-
-function PathHeatmap.setDayLength(seconds)
-	PathHeatmap.halfLife = seconds * HALF_LIFE_DAYS
+function grid.keyAt(x, z)
+	return (floor(x / CELL) + OFFSET) * STRIDE + (floor(z / CELL) + OFFSET)
 end
 
-local function weightAt(key, now)
-	local w = PathHeatmap.weights[key]
-	if not w then return 0 end
-	return w * 0.5 ^ ((now - PathHeatmap.stamps[key]) / PathHeatmap.halfLife)
+function grid.reset()
+	grid.weights, grid.heights = {}, {}
+	grid.epoch, grid.now = 0, 0
+	grid.setTime(0)
 end
 
-function PathHeatmap.addSample(x, y, z, dt, now)
-	local key = keyOf(cellOf(x, z))
-	PathHeatmap.heights[key] = y
-	PathHeatmap.weights[key] = math.min(weightAt(key, now) + dt, MAX_WEIGHT)
-	PathHeatmap.stamps[key] = now
+function grid.setDayLength(seconds)
+	grid.halfLife = seconds * cfg.HALF_LIFE_DAYS
+	grid.setTime(grid.now)
 end
 
-function PathHeatmap.prune(now)
+-- Call once per frame before sampling or searching.
+function grid.setTime(now)
+	grid.now = now
+	grid.gain = 2 ^ ((now - grid.epoch) / grid.halfLife)
+	grid.activeScaled = ACTIVE_WEIGHT * grid.gain
+	grid.capScaled = MAX_WEIGHT * grid.gain
+end
+
+function grid.addSample(x, y, z, weight)
+	local key = (floor(x / CELL) + OFFSET) * STRIDE + (floor(z / CELL) + OFFSET)
+	local weights = grid.weights
+	local s = (weights[key] or 0) + weight * grid.gain
+	local cap = grid.capScaled
+	if s > cap then s = cap end
+	weights[key] = s
+	grid.heights[key] = y
+end
+
+function grid.weightAt(key)
+	local s = grid.weights[key]
+	return s and s / grid.gain or 0
+end
+
+function grid.isActive(key)
+	local s = grid.weights[key]
+	return s ~= nil and s >= grid.activeScaled
+end
+
+-- Remove cells that are no longer walkable; they add nothing to a search, and a
+-- re-walked cell is walkable again after one crossing. Rebases when the gain
+-- gets large. Returns the number of cells removed.
+function grid.prune()
+	local weights, heights = grid.weights, grid.heights
+	local threshold = grid.activeScaled
+	local rebase = grid.gain > REBASE_ABOVE
+	local scale = rebase and 1 / grid.gain or 1
 	local removed = 0
-	for key in pairs(PathHeatmap.weights) do
-		if weightAt(key, now) < ACTIVE_WEIGHT * 0.1 then
-			PathHeatmap.weights[key] = nil
-			PathHeatmap.stamps[key] = nil
-			PathHeatmap.heights[key] = nil
+	for key, s in pairs(weights) do
+		if s < threshold then
+			weights[key] = nil
+			heights[key] = nil
 			removed = removed + 1
+		elseif rebase then
+			weights[key] = s * scale
 		end
+	end
+	if rebase then
+		grid.epoch = grid.now
+		grid.setTime(grid.now)
 	end
 	return removed
 end
 
-function PathHeatmap.countCells(now)
+function grid.count()
 	local total, active = 0, 0
-	for key in pairs(PathHeatmap.weights) do
+	local threshold = grid.activeScaled
+	for _, s in pairs(grid.weights) do
 		total = total + 1
-		if weightAt(key, now) >= ACTIVE_WEIGHT then active = active + 1 end
+		if s >= threshold then active = active + 1 end
 	end
 	return total, active
 end
 
--- Save/load. Weights are written already decayed to `now` and restored with a
--- fresh timestamp: the mod clock restarts at 0 on every load, and game time does
--- not pass while a save sits on disk. Format: "v1;" then ";"-separated
--- "cx,cz,weight,height" entries.
-function PathHeatmap.export(now)
-	local parts = { "v1" }
-	for key in pairs(PathHeatmap.weights) do
-		local w = weightAt(key, now)
-		if w >= ACTIVE_WEIGHT * 0.1 then
-			local cx, cz = coordsOf(key)
-			parts[#parts + 1] = string.format("%d,%d,%.3f,%.1f", cx, cz, w, PathHeatmap.heights[key] or 0)
+-- Save format -----------------------------------------------------------------
+--
+-- v2: "v2;" followed by one record per grid column (fixed cx), in any order:
+--   cx + 2048 as 2 base-64 digits, the cell count as 2 digits, then per cell in
+--   ascending cz: the cz step as a base-32 varint (the first cell stores
+--   cz + 2048), the weight as 1 digit (1..63 of MAX_WEIGHT), and the height as
+--   2 digits (quarter metres from -512 m).
+-- That is 3 to 6 characters per cell (columns along a trail are cheap, short
+-- columns across one pay for their header), against about 25 for v1. Cells more
+-- than 4 km from the map origin are not saved.
+-- v1 (older saves): "v1;" then "cx,cz,weight,height" entries separated by ";".
+
+local DIGITS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+local DIGIT_BYTE, DIGIT_VALUE = {}, {}
+for i = 1, 64 do
+	local b = string.byte(DIGITS, i)
+	DIGIT_BYTE[i - 1] = b
+	DIGIT_VALUE[b] = i - 1
+end
+local COORD_OFFSET = 2048
+local HEIGHT_OFFSET, HEIGHT_STEPS = 512, 4
+local MAX_COLUMN = 4095
+local unpack = unpack or table.unpack
+
+-- Builds the save string a few thousand cells per step, so a large history does
+-- not stall one frame. First it walks the grid with next() to group cells into
+-- columns: while job.snapshotting is true the grid must not gain or lose cells
+-- (the sampler waits, prune waits for the whole job). Then it encodes the
+-- columns into a byte buffer that becomes one string per step. Cells added
+-- after the walk are left for the next export.
+function grid.newExportJob()
+	local job = { done = false, cells = 0, snapshotting = true }
+	local columns, order = {}, {}
+	local cursor = nil
+
+	local function snapshot(budget)
+		local weights, threshold = grid.weights, grid.activeScaled
+		local key, s = next(weights, cursor)
+		while key ~= nil and budget > 0 do
+			budget = budget - 1
+			if s >= threshold then
+				local cx = floor(key / STRIDE) - OFFSET
+				local col = columns[cx]
+				if not col then
+					col = {}
+					columns[cx] = col
+					order[#order + 1] = cx
+				end
+				col[#col + 1] = key % STRIDE - OFFSET
+			end
+			cursor = key
+			key, s = next(weights, key)
 		end
+		if key == nil then job.snapshotting = false end
+		return budget
 	end
-	return table.concat(parts, ";")
+
+	local pieces = { "v2;" }
+	local buf, n = {}, 0
+	local index = 1
+
+	local function flush()
+		local i = 1
+		while i <= n do
+			local j = math.min(i + 3999, n)
+			pieces[#pieces + 1] = string.char(unpack(buf, i, j))
+			i = j + 1
+		end
+		n = 0
+	end
+
+	function job.step(budget)
+		if job.snapshotting then
+			-- Walking is cheaper per cell than encoding.
+			snapshot(budget * 4)
+			return false
+		end
+		local weights, heights = grid.weights, grid.heights
+		local toWeight = 63 / (MAX_WEIGHT * grid.gain)
+		while budget > 0 and index <= #order do
+			local cx = order[index]
+			index = index + 1
+			local col = columns[cx]
+			budget = budget - #col
+			table.sort(col)
+			local count = 0
+			if cx >= -COORD_OFFSET and cx < COORD_OFFSET then
+				for i = 1, #col do
+					local cz = col[i]
+					if cz >= -COORD_OFFSET and cz < COORD_OFFSET then count = count + 1 end
+				end
+			end
+			if count > MAX_COLUMN then count = MAX_COLUMN end
+			if count > 0 then
+				local v = cx + COORD_OFFSET
+				buf[n + 1], buf[n + 2] = DIGIT_BYTE[floor(v / 64)], DIGIT_BYTE[v % 64]
+				buf[n + 3], buf[n + 4] = DIGIT_BYTE[floor(count / 64)], DIGIT_BYTE[count % 64]
+				n = n + 4
+				local base = (cx + OFFSET) * STRIDE + OFFSET
+				local previous, written = nil, 0
+				for i = 1, #col do
+					local cz = col[i]
+					if written < count and cz >= -COORD_OFFSET and cz < COORD_OFFSET then
+						written = written + 1
+						local key = base + cz
+						v = previous and (cz - previous) or (cz + COORD_OFFSET)
+						previous = cz
+						while v >= 32 do
+							n = n + 1
+							buf[n] = DIGIT_BYTE[32 + v % 32]
+							v = floor(v / 32)
+						end
+						local q = floor((weights[key] or 0) * toWeight + 0.5)
+						if q < 1 then q = 1 elseif q > 63 then q = 63 end
+						local h = floor(((heights[key] or 0) + HEIGHT_OFFSET) * HEIGHT_STEPS + 0.5)
+						if h < 0 then h = 0 elseif h > 4095 then h = 4095 end
+						buf[n + 1], buf[n + 2] = DIGIT_BYTE[v], DIGIT_BYTE[q]
+						buf[n + 3], buf[n + 4] = DIGIT_BYTE[floor(h / 64)], DIGIT_BYTE[h % 64]
+						n = n + 4
+					end
+				end
+				job.cells = job.cells + count
+			end
+		end
+		flush()
+		if index > #order then
+			job.result = table.concat(pieces)
+			job.done = true
+		end
+		return job.done
+	end
+
+	return job
 end
 
-function PathHeatmap.import(str, now)
-	if type(str) ~= "string" or string.sub(str, 1, 3) ~= "v1;" then return 0 end
+function grid.export()
+	local job = grid.newExportJob()
+	repeat until job.step(math.huge)
+	return job.result
+end
+
+local function importV1(str, now)
 	local n = 0
 	for entry in string.gmatch(string.sub(str, 4), "[^;]+") do
 		local cx, cz, w, y = string.match(entry, "^(-?%d+),(-?%d+),([%d.]+),(-?[%d.]+)$")
 		if cx then
-			local key = keyOf(tonumber(cx), tonumber(cz))
-			PathHeatmap.weights[key] = math.min(tonumber(w), MAX_WEIGHT) -- older saves used a higher cap
-			PathHeatmap.stamps[key] = now
-			PathHeatmap.heights[key] = tonumber(y)
+			local key = grid.keyOf(tonumber(cx), tonumber(cz))
+			grid.weights[key] = math.min(tonumber(w), MAX_WEIGHT) * grid.gain -- older saves used a higher cap
+			grid.heights[key] = tonumber(y)
 			n = n + 1
 		end
 	end
 	return n
 end
 
--- Minimal binary min-heap of { distance, key }.
-local function heapPush(heap, d, key)
-	local i = #heap + 1
-	heap[i] = { d, key }
-	while i > 1 do
-		local p = math.floor(i / 2)
-		if heap[p][1] <= heap[i][1] then break end
-		heap[p], heap[i] = heap[i], heap[p]
-		i = p
+local function importV2(str)
+	local byte = string.byte
+	local pos, len = 4, #str
+	local function digit()
+		local v = DIGIT_VALUE[byte(str, pos)]
+		pos = pos + 1
+		if v == nil then error("bad character at " .. (pos - 1)) end
+		return v
 	end
-end
-
-local function heapPop(heap)
-	local top = heap[1]
-	local last = table.remove(heap)
-	local n = #heap
-	if n > 0 then
-		heap[1] = last
-		local i = 1
+	local function get2()
+		local hi = digit()
+		return hi * 64 + digit()
+	end
+	local function getVarint()
+		local v, scale = 0, 1
 		while true do
-			local l, r, m = i * 2, i * 2 + 1, i
-			if l <= n and heap[l][1] < heap[m][1] then m = l end
-			if r <= n and heap[r][1] < heap[m][1] then m = r end
-			if m == i then break end
-			heap[m], heap[i] = heap[i], heap[m]
-			i = m
+			local d = digit()
+			if d >= 32 then
+				v = v + (d - 32) * scale
+				scale = scale * 32
+			else
+				return v + d * scale
+			end
 		end
 	end
-	return top
+
+	local weights, heights, gain = grid.weights, grid.heights, grid.gain
+	local n = 0
+	while pos <= len do
+		local cx = get2() - COORD_OFFSET
+		local count = get2()
+		local cz = nil
+		for _ = 1, count do
+			local step = getVarint()
+			cz = cz and (cz + step) or (step - COORD_OFFSET)
+			local w = digit() * MAX_WEIGHT / 63
+			local h = get2() / HEIGHT_STEPS - HEIGHT_OFFSET
+			local key = grid.keyOf(cx, cz)
+			weights[key] = w * gain
+			heights[key] = h
+			n = n + 1
+		end
+	end
+	return n
 end
 
-local NEIGHBOURS = {
-	{ 1, 0, CELL }, { -1, 0, CELL }, { 0, 1, CELL }, { 0, -1, CELL },
-	{ 1, 1, DIAG }, { 1, -1, DIAG }, { -1, 1, DIAG }, { -1, -1, DIAG },
-}
-
--- Walking distance (metres) from a set of start points to every walked cell
--- within MAX_DIST. Each point is { x, z, radius }: walked cells within `radius`
--- metres of it become starting cells, at their straight-line distance from the
--- point. Several points (a building's entrances) are searched at once.
--- Returns dist (key -> metres), band counts, and a status string.
-function PathHeatmap.distanceField(points, now)
-	local heap, dist = {}, {}
-	local seeds = 0
-	for _, pt in ipairs(points) do
-		local ox, oz = cellOf(pt.x, pt.z)
-		local radius = pt.radius or SEED_RADIUS
-		local reach = math.ceil(radius / CELL)
-		for dx = -reach, reach do
-			for dz = -reach, reach do
-				local key = keyOf(ox + dx, oz + dz)
-				if weightAt(key, now) >= ACTIVE_WEIGHT then
-					local ex = (ox + dx + 0.5) * CELL - pt.x
-					local ez = (oz + dz + 0.5) * CELL - pt.z
-					local d = math.sqrt(ex * ex + ez * ez)
-					if d <= radius and (dist[key] == nil or d < dist[key]) then
-						if dist[key] == nil then seeds = seeds + 1 end
-						dist[key] = d
-						heapPush(heap, d, key)
-					end
-				end
-			end
-		end
-	end
-	if seeds == 0 then
-		return nil, nil, "no walked cells near the building's start points"
-	end
-
-	local done = {}
-	while #heap > 0 do
-		local item = heapPop(heap)
-		local d, key = item[1], item[2]
-		if not done[key] and d <= dist[key] then
-			done[key] = true
-			local cx, cz = coordsOf(key)
-			for _, n in ipairs(NEIGHBOURS) do
-				local nk = keyOf(cx + n[1], cz + n[2])
-				local nd = d + n[3]
-				if nd <= MAX_DIST and (dist[nk] == nil or nd < dist[nk]) and weightAt(nk, now) >= ACTIVE_WEIGHT then
-					dist[nk] = nd
-					heapPush(heap, nd, nk)
-				end
-			end
-		end
-	end
-
-	local counts = {}
-	for _, b in ipairs(BANDS) do counts[b] = 0 end
-	for _, d in pairs(dist) do
-		for _, b in ipairs(BANDS) do
-			if d <= b then
-				counts[b] = counts[b] + 1
-				break
-			end
-		end
-	end
-	return dist, counts, seeds .. " seed cells"
+-- Restores a saved history into the current grid. Returns the cell count, and an
+-- error message if the string was damaged (cells read before the damage are kept).
+function grid.import(str)
+	if type(str) ~= "string" then return 0 end
+	local version = string.sub(str, 1, 3)
+	if version == "v1;" then return importV1(str) end
+	if version ~= "v2;" then return 0 end
+	local before = 0
+	for _ in pairs(grid.weights) do before = before + 1 end
+	local ok, result = pcall(importV2, str)
+	if ok then return result end
+	local after = 0
+	for _ in pairs(grid.weights) do after = after + 1 end
+	return after - before, tostring(result)
 end
-
-PathHeatmap.BANDS = BANDS
-PathHeatmap.cellOf = cellOf
-PathHeatmap.coordsOf = coordsOf
-PathHeatmap.keyOf = keyOf
-PathHeatmap.CELL = CELL
-PathHeatmap.SEED_RADIUS = SEED_RADIUS
