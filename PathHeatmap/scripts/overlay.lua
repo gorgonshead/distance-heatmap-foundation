@@ -14,7 +14,6 @@ local CELL = grid.CELL
 local abs, sqrt, cos, sin = math.abs, math.sqrt, math.cos, math.sin
 
 local CONTAINER_NAME = "PATH_HEATMAP_MARKERS"
-local LEGACY_MARKER_NAME = "PATH_HEATMAP_MARKER" -- loose markers saved by older versions
 local EMPTY_PREFAB = "PREFAB_EMPTY_PART"
 local UP = { x = 0, y = 1, z = 0 }
 -- rayCast's flag is a bit field of OBJECT_FLAG numbers (the wiki's Enumerations
@@ -36,11 +35,6 @@ end
 local function destroyStale(obj)
 	if obj then pcall(destroyTree, obj) end
 end
-
--- Markers left by versions before the container, if the mod was reloaded with
--- an overlay showing.
-for _, m in pairs(PathHeatmapMarkers or {}) do destroyStale(m.obj) end
-PathHeatmapMarkers = nil
 
 PathHeatmapOverlay = PathHeatmapOverlay or {}
 local state = PathHeatmapOverlay
@@ -77,9 +71,8 @@ end
 
 function overlay.sweep()
 	local containers = sweepByName(CONTAINER_NAME, 20)
-	local loose = sweepByName(LEGACY_MARKER_NAME, 5000)
-	if containers + loose > 0 then
-		mod:log(string.format("removed saved overlay: %d containers, %d loose markers", containers, loose))
+	if containers > 0 then
+		mod:log(string.format("removed saved overlay: %d containers", containers))
 	end
 end
 

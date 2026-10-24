@@ -133,9 +133,8 @@ end
 --   cz + 2048), the weight as 1 digit (1..63 of MAX_WEIGHT), and the height as
 --   2 digits (quarter metres from -512 m).
 -- That is 3 to 6 characters per cell (columns along a trail are cheap, short
--- columns across one pay for their header), against about 25 for v1. Cells more
--- than 4 km from the map origin are not saved.
--- v1 (older saves): "v1;" then "cx,cz,weight,height" entries separated by ";".
+-- columns across one pay for their header). Cells more than 4 km from the map
+-- origin are not saved.
 
 local DIGITS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 local DIGIT_BYTE, DIGIT_VALUE = {}, {}
@@ -266,20 +265,6 @@ function grid.export()
 	return job.result
 end
 
-local function importV1(str, now)
-	local n = 0
-	for entry in string.gmatch(string.sub(str, 4), "[^;]+") do
-		local cx, cz, w, y = string.match(entry, "^(-?%d+),(-?%d+),([%d.]+),(-?[%d.]+)$")
-		if cx then
-			local key = grid.keyOf(tonumber(cx), tonumber(cz))
-			grid.weights[key] = math.min(tonumber(w), MAX_WEIGHT) * grid.gain -- older saves used a higher cap
-			grid.heights[key] = tonumber(y)
-			n = n + 1
-		end
-	end
-	return n
-end
-
 local function importV2(str)
 	local byte = string.byte
 	local pos, len = 4, #str
@@ -330,9 +315,7 @@ end
 -- error message if the string was damaged (cells read before the damage are kept).
 function grid.import(str)
 	if type(str) ~= "string" then return 0 end
-	local version = string.sub(str, 1, 3)
-	if version == "v1;" then return importV1(str) end
-	if version ~= "v2;" then return 0 end
+	if string.sub(str, 1, 3) ~= "v2;" then return 0 end
 	local before = 0
 	for _ in pairs(grid.weights) do before = before + 1 end
 	local ok, result = pcall(importV2, str)

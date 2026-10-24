@@ -27,7 +27,7 @@ end
 local function loadMod(cfgOverrides)
 	local mod = fake.newMod(ROOT)
 	foundation.createMod = function() return mod end
-	PathHeatmapOverlay, PathHeatmapMarkers = nil, nil
+	PathHeatmapOverlay = nil
 	local chunk = assert(loadfile(ROOT .. "/PathHeatmap/mod.lua"))
 	-- Apply overrides between config load and the rest: patch dofile.
 	local original = mod.dofile
@@ -202,17 +202,6 @@ test("chunked export matches one-shot export", function()
 	local job = grid.newExportJob()
 	runJob(job, 7)
 	assert(job.result == whole, "same string")
-end)
-
-test("save format v1 still imports", function()
-	loadMod()
-	local grid = PathHeatmap.grid
-	grid.reset()
-	local n = grid.import("v1;10,-5,1.500,12.5;11,-5,20.000,13.0")
-	assert(n == 2, "two cells")
-	near(grid.weightAt(grid.keyOf(10, -5)), 1.5, 1e-9, "weight")
-	near(grid.weightAt(grid.keyOf(11, -5)), PathHeatmap.cfg.MAX_WEIGHT, 1e-9, "old cap clamped")
-	near(grid.heights[grid.keyOf(10, -5)], 12.5, 1e-9, "height")
 end)
 
 test("damaged save keeps what it read and reports", function()
