@@ -98,7 +98,7 @@ test("weight halves every half-life", function()
 	loadMod()
 	local grid = PathHeatmap.grid
 	grid.reset()
-	grid.setDayLength(60)
+	grid.configureDecay(60)
 	grid.addSample(1, 0, 1, 2)
 	local key = grid.keyAt(1, 1)
 	near(grid.weightAt(key), 2, 1e-9, "fresh")
@@ -120,7 +120,7 @@ test("prune drops faded cells and rebasing keeps weights", function()
 	loadMod()
 	local grid = PathHeatmap.grid
 	grid.reset()
-	grid.setDayLength(60)
+	grid.configureDecay(60)
 	grid.addSample(1, 0, 1, 0.3) -- fades below walkable quickly
 	grid.addSample(11, 0, 11, 6)
 	local strong = grid.keyAt(11, 11)
@@ -141,7 +141,7 @@ test("rebase keeps walkable cells walkable", function()
 	loadMod()
 	local grid = PathHeatmap.grid
 	grid.reset()
-	grid.setDayLength(60)
+	grid.configureDecay(60)
 	local t = grid.halfLife * 31
 	grid.setTime(t)
 	grid.addSample(1, 0, 1, 3)

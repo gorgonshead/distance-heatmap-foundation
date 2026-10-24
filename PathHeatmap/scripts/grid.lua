@@ -57,7 +57,7 @@ function grid.reset()
 	grid.setTime(0)
 end
 
-function grid.setDayLength(seconds)
+function grid.configureDecay(seconds)
 	grid.halfLife = seconds * cfg.HALF_LIFE_DAYS
 	grid.setTime(grid.now)
 end

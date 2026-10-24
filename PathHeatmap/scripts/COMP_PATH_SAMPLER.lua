@@ -3,7 +3,7 @@ local mod = ...
 -- One global component on the level's manager prefab. It samples where people
 -- walk, watches building selection, and runs the overlay pipeline for the
 -- selected building a budgeted amount per frame:
---   search (walking distances) -> plan (shapes) -> reconcile (markers).
+-- search (walking distances) -> plan (shapes) -> reconcile (markers).
 -- (PREFAB_MANAGER resolves; guessed agent prefab ids break new-game setup.)
 
 local cfg = PathHeatmap.cfg
