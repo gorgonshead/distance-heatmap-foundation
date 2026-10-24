@@ -119,12 +119,18 @@ foundation = {
 PARTICLE_BILLBOARD_BEHAVIOR = { XZ = "XZ", FACE_CAMERA = "FACE_CAMERA" }
 PARTICLE_QUALITY = { LOW = "LOW", MEDIUM = "MEDIUM" }
 PARTICLE_TIME_SCALE_TYPE = { UNSCALED = "UNSCALED", DEFAULT = "DEFAULT" }
-OBJECT_FLAG = { TERRAIN = 1 }
+-- Enum values have toNumber (the wiki's Enumerations page). TERRAIN is numbered 2
+-- in game (Lit Windows' ray test, 2026-10-18).
+OBJECT_FLAG = { TERRAIN = { toNumber = function() return 2 end } }
+-- The game's bit table (LuaJIT's BitOp); plain Lua 5.1 has none.
+if not bit then
+	bit = { lshift = function(a, n) return a * 2 ^ n end }
+end
 
 -- Component managers and the level.
 function fake.newLevel(opts)
 	opts = opts or {}
-	local level = { managers = {}, dt = 0.016, unscaled = 0.016 }
+	local level = { managers = {}, dt = 0.016, unscaled = 0.016, rays = 0, badRayFlags = 0 }
 	level.terrainHeight = opts.terrainHeight or function(x, z) return 10 end
 
 	function level:getDeltaTime() return self.dt end
@@ -157,7 +163,15 @@ function fake.newLevel(opts)
 		if prefab ~= nil and type(prefab) ~= "table" then error("createObject: bad prefab") end
 		return fake.newObject(prefab and prefab.asset or "Object", pos)
 	end
+	-- The fake has only terrain, and the mod wants nothing else: a ray whose flag
+	-- is not a bit field with the terrain bit set is counted and misses.
 	function level:rayCast(from, to, out, flag)
+		self.rays = self.rays + 1
+		local terrainBit = 2 ^ OBJECT_FLAG.TERRAIN:toNumber()
+		if type(flag) ~= "number" or math.floor(flag / terrainBit) % 2 ~= 1 then
+			self.badRayFlags = self.badRayFlags + 1
+			return false
+		end
 		local x, z = from[1], from[3]
 		out.Position = { x = x, y = self.terrainHeight(x, z), z = z }
 		out.Normal = { x = 0, y = 1, z = 0 }

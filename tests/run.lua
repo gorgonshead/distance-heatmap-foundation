@@ -591,5 +591,16 @@ test("sampler: selection timeline, and OVERLAY off skips the overlay", function(
 	PathHeatmap.cfg.OVERLAY = true
 end)
 
+test("sampler: marker rays hit the terrain only", function()
+	local level = fake.newLevel()
+	local building = fake.newBuilding(level, 50, 10, 50, { { 3, 0 } })
+	local comp = newSampler(level)
+	walk(line(25, 25, 60, 25))
+	fake.fire(building.ON_BUILDING_SELECTED_HIGHLIGHT_CHANGED, true)
+	settle(comp)
+	assert(level.rays > 0, "rays cast")
+	assert(level.badRayFlags == 0, level.badRayFlags .. " rays without the terrain mask")
+end)
+
 print(string.format("%d passed, %d failed", passed, failures))
 return failures

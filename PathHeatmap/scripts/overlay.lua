@@ -17,6 +17,10 @@ local CONTAINER_NAME = "PATH_HEATMAP_MARKERS"
 local LEGACY_MARKER_NAME = "PATH_HEATMAP_MARKER" -- loose markers saved by older versions
 local EMPTY_PREFAB = "PREFAB_EMPTY_PART"
 local UP = { x = 0, y = 1, z = 0 }
+-- rayCast's flag is a bit field of OBJECT_FLAG numbers (the wiki's Enumerations
+-- page). Passing the enum value itself filters nothing: rays then stop on
+-- buildings and villagers too.
+local TERRAIN_ONLY = bit.lshift(1, OBJECT_FLAG.TERRAIN:toNumber()) -- 4 in game (TERRAIN is 2)
 
 local overlay = {}
 PathHeatmap.overlay = overlay
@@ -85,7 +89,7 @@ end
 -- its out argument with Position and Normal.
 local function groundAt(level, x, yHint, z)
 	local out = {}
-	local hit = level:rayCast({ x, yHint + 40, z }, { x, yHint - 40, z }, out, OBJECT_FLAG.TERRAIN)
+	local hit = level:rayCast({ x, yHint + 40, z }, { x, yHint - 40, z }, out, TERRAIN_ONLY)
 	if not hit or not out.Position or not out.Normal then return nil end
 	local p, n = out.Position, out.Normal
 	return { x = p.x, y = p.y, z = p.z }, { x = n.x, y = n.y, z = n.z }
@@ -93,8 +97,8 @@ end
 
 -- Slope from the walked heights: a least-squares plane through the feet heights
 -- recorded within SLOPE_REACH cells. That is the surface people stand on, so it
--- holds where the terrain ray hits something else, such as a building
--- platform. Returns nil with too few samples or samples along one line.
+-- holds where they walk above the terrain, such as on a building platform.
+-- Returns nil with too few samples or samples along one line.
 local SLOPE_REACH = 3
 local MIN_NORMAL_Y = 0.7 -- steepest tilt allowed, about 45 degrees
 local SLOPE_OFFSET, SLOPE_X, SLOPE_Z = {}, {}, {}
@@ -161,8 +165,9 @@ local function createMarker(level, key, spec, stats)
 	local cx, cz = grid.coordsOf(key)
 	local x, z = (cx + 0.5) * CELL, (cz + 0.5) * CELL
 	-- The centre is a walked cell, so the feet height recorded there is the
-	-- surface that matters. Where the terrain ray disagrees with it, the ray hit
-	-- something else, so use the walked height and the slope fitted to it.
+	-- surface that matters. Where the terrain is far from it, people walk on
+	-- something built (a platform, a bridge), so use the walked height and the
+	-- slope fitted to it.
 	local y = grid.heights[key] or 0
 	local ground, normal = groundAt(level, x, y, z)
 	if ground and abs(ground.y - y) > cfg.MAX_GROUND_MISMATCH then
