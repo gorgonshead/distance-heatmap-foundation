@@ -151,9 +151,6 @@ function fake.newLevel(opts)
 		return m
 	end
 	function level:getComponentManager(typeName)
-		if opts.missingTypes and opts.missingTypes[typeName] then
-			error("unknown component type " .. typeName)
-		end
 		return self:manager(typeName)
 	end
 	function level:createObject(prefab, pos)

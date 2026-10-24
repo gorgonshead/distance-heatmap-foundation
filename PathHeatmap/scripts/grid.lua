@@ -229,7 +229,7 @@ function grid.newExportJob()
 					local cz = col[i]
 					if written < count and cz >= -COORD_OFFSET and cz < COORD_OFFSET then
 						written = written + 1
-						local key = base + cz
+						local key = base + cz 
 						v = previous and (cz - previous) or (cz + COORD_OFFSET)
 						previous = cz
 						while v >= 32 do

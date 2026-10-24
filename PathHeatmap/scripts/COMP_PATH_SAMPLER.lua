@@ -27,7 +27,6 @@ local COMP_PATH_SAMPLER = {
 
 local addSample = grid.addSample
 local sampleWeight, sampledCount = 0, 0
-local cycleManagers = {}
 
 local function sampleAgent(agent)
 	local p = agent:getOwner():getGlobalPosition()
@@ -35,9 +34,9 @@ local function sampleAgent(agent)
 	sampledCount = sampledCount + 1
 end
 
-local function sampleCycle()
-	for i = 1, #cycleManagers do
-		cycleManagers[i]:getAllEnabledComponent():forEach(sampleAgent)
+local function sampleCycle(managers)
+	for i = 1, #managers do
+		managers[i]:getAllEnabledComponent():forEach(sampleAgent)
 	end
 end
 
@@ -70,7 +69,7 @@ local function walkEntrances(building)
 	local owner = building:getOwner()
 	local origin = owner:getGlobalPosition()
 	local points, children = {}, 0
-	local ok, err = pcall(owner.forEachChildRecursive, owner, function(child)
+	owner:forEachChildRecursive(function(child)
 		children = children + 1
 		if string.sub(tostring(child.Name), 1, #ENTRANCE_NAME) == ENTRANCE_NAME then
 			local p = child:getGlobalPosition()
@@ -81,7 +80,6 @@ local function walkEntrances(building)
 			points[#points + 1] = { x = p.x, z = p.z, radius = cfg.ENTRANCE_RADIUS }
 		end
 	end)
-	if not ok then mod:logWarning("child walk failed: " .. tostring(err)) end
 	if #points == 0 then
 		points[1] = { x = origin.x, z = origin.z, radius = cfg.SEED_RADIUS }
 	end
@@ -109,12 +107,8 @@ function COMP_PATH_SAMPLER:init()
 	-- that would let one village's history leak into another if it ever isn't.
 	grid.reset()
 	PathHeatmap.clock = 0
-	local ok, dayLength = pcall(function()
-		return level:find("COMP_MAIN_GAME_LOOP"):getDayDurationInSeconds()
-	end)
-	if ok and type(dayLength) == "number" and dayLength > 0 then
-		grid.setDayLength(dayLength)
-	end
+	local dayLength = level:find("COMP_MAIN_GAME_LOOP"):getDayDurationInSeconds()
+	if dayLength > 0 then grid.configureDecay(dayLength) end
 
 	overlay.sweep()
 
@@ -124,16 +118,11 @@ function COMP_PATH_SAMPLER:init()
 		tostring(dayLength), restored, type(saved) == "string" and #saved or 0))
 	if importError then mod:logWarning("saved history was damaged: " .. importError) end
 
-	-- Resolve the agent managers once; drop types this game version lacks.
-	self._managers, self._managerNames = {}, {}
-	for _, typeName in ipairs(cfg.AGENT_TYPES) do
-		local okManager, manager = pcall(level.getComponentManager, level, typeName)
-		if okManager and manager and pcall(manager.getAllEnabledComponent, manager) then
-			self._managers[#self._managers + 1] = manager
-			self._managerNames[#self._managerNames + 1] = typeName
-		end
+	-- Resolve the agent managers once.
+	self._managers = {}
+	for i, typeName in ipairs(cfg.AGENT_TYPES) do
+		self._managers[i] = level:getComponentManager(typeName)
 	end
-	trace("sampling " .. table.concat(self._managerNames, ", "))
 
 	local buildings = level:getComponentManager("COMP_BUILDING")
 	buildings:getAllComponent():forEach(function(building)
@@ -148,7 +137,7 @@ end
 -- type lacks one.
 local function listen(target, building, eventName, callback)
 	local ev = building[eventName]
-	if ev then pcall(event.register, target, ev, callback) end
+	if ev then event.register(target, ev, callback) end
 end
 
 function COMP_PATH_SAMPLER:watchBuilding(building)
@@ -167,7 +156,7 @@ function COMP_PATH_SAMPLER:watchBuilding(building)
 end
 
 function COMP_PATH_SAMPLER:onFinalize(isClearingLevel)
-	pcall(function() self.SavedCells = grid.export() end)
+	self.SavedCells = grid.export()
 	overlay.clear()
 end
 
@@ -244,12 +233,7 @@ function COMP_PATH_SAMPLER:stepPipeline()
 		self:note("plan")
 		if job.step(cfg.PLAN_WORK_PER_FRAME) then
 			self._plan = nil
-			local ok, result = pcall(overlay.newReconcileJob, self._level, job.plan)
-			if ok then
-				self._reconcile = result
-			else
-				mod:logError("overlay update failed: " .. tostring(result))
-			end
+			self._reconcile = overlay.newReconcileJob(self._level, job.plan)
 		end
 	elseif self._reconcile then
 		local job = self._reconcile
@@ -257,8 +241,8 @@ function COMP_PATH_SAMPLER:stepPipeline()
 		if job.step() then
 			self._reconcile = nil
 			if DEBUG then
-				trace(string.format("markers: %d created, %d destroyed, %d failed, %d now; %d off the terrain ray",
-					job.created, job.destroyed, job.failed, overlay.markerCount(), job.mismatches or 0))
+				trace(string.format("markers: %d created, %d destroyed, %d now; %d off the terrain ray",
+					job.created, job.destroyed, overlay.markerCount(), job.mismatches or 0))
 			end
 		end
 	elseif self._searchWanted and PathHeatmap.selected then
@@ -290,12 +274,7 @@ function COMP_PATH_SAMPLER:update()
 			sampleWeight = math.min(self._sinceSample, cfg.MAX_SAMPLE_WEIGHT)
 			self._sinceSample = 0
 			sampledCount = 0
-			cycleManagers = self._managers
-			local ok, err = pcall(sampleCycle)
-			if not ok and not self._sampleWarned then
-				self._sampleWarned = true
-				mod:logWarning("sampling failed: " .. tostring(err))
-			end
+			sampleCycle(self._managers)
 			self._lastSampled = sampledCount
 			self:note("sample")
 		end
@@ -403,8 +382,7 @@ function COMP_PATH_SAMPLER:summarize(dt)
 	self._sinceLog = 0
 	if not self._typesLogged then
 		self._typesLogged = true
-		local ok, err = pcall(self.logAgentTypes, self)
-		if not ok then trace("agent type check failed: " .. tostring(err)) end
+		self:logAgentTypes()
 	end
 	local total, active = grid.count()
 	trace(string.format("summary: %d agents per sample, %d cells (%d walkable), %d markers, baseline frame %.1f ms",
@@ -431,7 +409,7 @@ function COMP_PATH_SAMPLER:logAgentTypes()
 			local id = tostring(agent:getOwner():getId())
 			if seen[id] then shared = shared + 1 else seen[id] = true end
 		end)
-		parts[#parts + 1] = self._managerNames[i] .. " " .. n
+		parts[#parts + 1] = cfg.AGENT_TYPES[i] .. " " .. n
 	end
 	trace(string.format("agents by type: %s; %d listed under more than one type",
 		table.concat(parts, ", "), shared))

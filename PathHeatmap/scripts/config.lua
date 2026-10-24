@@ -12,8 +12,7 @@ PathHeatmap.cfg = {
 	OVERLAY = true,
 
 	-- Sampling --------------------------------------------------------------
-	-- Component types that represent walking people. Types that do not resolve
-	-- in this game version are dropped at level start.
+	-- Component types that represent walking people.
 	AGENT_TYPES = { "COMP_VILLAGER", "COMP_VISITOR" },
 	-- Game seconds between position samples. Each sample adds the elapsed time
 	-- as weight, so the total does not depend on this. At walking pace an agent

@@ -591,15 +591,5 @@ test("sampler: selection timeline, and OVERLAY off skips the overlay", function(
 	PathHeatmap.cfg.OVERLAY = true
 end)
 
-test("sampler: missing agent types are skipped", function()
-	local level = fake.newLevel({ missingTypes = { COMP_VISITOR = true } })
-	local comp, mod = newSampler(level)
-	fake.newAgent(level, "COMP_VILLAGER", 10, 10, 10)
-	level.dt = 0.1
-	frames(comp, 10)
-	assert(#mod.warnings == 0, table.concat(mod.warnings, ";"))
-	assert(comp._lastSampled == 1, "one agent sampled")
-end)
-
 print(string.format("%d passed, %d failed", passed, failures))
 return failures

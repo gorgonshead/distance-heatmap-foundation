@@ -21,27 +21,26 @@ local UP = { x = 0, y = 1, z = 0 }
 local overlay = {}
 PathHeatmap.overlay = overlay
 
-local function destroy(obj)
-	if obj then pcall(obj.destroy, obj) end
-end
-
 -- The container: its children first, in case destroying a parent leaves them.
 local function destroyTree(obj)
-	if obj then pcall(obj.destroyAllChild, obj) end
-	destroy(obj)
+	obj:destroyAllChild()
+	obj:destroy()
+end
+
+-- What a previous load left in the globals may already be gone. Looking up a
+-- method on a destroyed object errors, so the whole call goes inside the pcall.
+local function destroyStale(obj)
+	if obj then pcall(destroyTree, obj) end
 end
 
 -- Markers left by versions before the container, if the mod was reloaded with
 -- an overlay showing.
-for _, m in pairs(PathHeatmapMarkers or {}) do destroy(m.obj) end
+for _, m in pairs(PathHeatmapMarkers or {}) do destroyStale(m.obj) end
 PathHeatmapMarkers = nil
 
 PathHeatmapOverlay = PathHeatmapOverlay or {}
 local state = PathHeatmapOverlay
-destroyTree(state.container)
-for _, m in pairs(state.markers or {}) do
-	if not m.parented then destroy(m.obj) end
-end
+destroyStale(state.container)
 state.container, state.markers = nil, {}
 
 function overlay.markerCount()
@@ -51,10 +50,7 @@ function overlay.markerCount()
 end
 
 function overlay.clear()
-	destroyTree(state.container)
-	for _, m in pairs(state.markers) do
-		if not m.parented then destroy(m.obj) end
-	end
+	if state.container then destroyTree(state.container) end
 	state.container, state.markers = nil, {}
 end
 
@@ -64,8 +60,8 @@ end
 local function sweepByName(name, limit)
 	local removed, seen = 0, {}
 	for _ = 1, limit do
-		local ok, obj = pcall(foundation.findGameObject, name)
-		if not ok or not obj then break end
+		local obj = foundation.findGameObject(name)
+		if not obj then break end
 		local id = tostring(obj:getId())
 		if seen[id] then break end
 		seen[id] = true
@@ -89,8 +85,8 @@ end
 -- its out argument with Position and Normal.
 local function groundAt(level, x, yHint, z)
 	local out = {}
-	local ok, hit = pcall(level.rayCast, level, { x, yHint + 40, z }, { x, yHint - 40, z }, out, OBJECT_FLAG.TERRAIN)
-	if not ok or not hit or not out.Position or not out.Normal then return nil end
+	local hit = level:rayCast({ x, yHint + 40, z }, { x, yHint - 40, z }, out, OBJECT_FLAG.TERRAIN)
+	if not hit or not out.Position or not out.Normal then return nil end
 	local p, n = out.Position, out.Normal
 	return { x = p.x, y = p.y, z = p.z }, { x = n.x, y = n.y, z = n.z }
 end
@@ -145,19 +141,13 @@ local function slopeFromWalked(key)
 end
 
 -- Turn an object so its up axis follows `normal` and its forward axis points
--- along (hx, hz) projected onto the slope. A failure leaves the marker upright.
-local orientWarned = false
+-- along (hx, hz) projected onto the slope.
 local function orient(obj, px, py, pz, normal, hx, hz)
 	local dot = hx * normal.x + hz * normal.z
 	local fx, fy, fz = hx - normal.x * dot, -normal.y * dot, hz - normal.z * dot
 	local len = sqrt(fx * fx + fy * fy + fz * fz)
 	if len < 0.001 then fx, fy, fz, len = 1, 0, 0, 1 end
-	local ok, err = pcall(obj.lookAt, obj, { px + fx / len, py + fy / len, pz + fz / len },
-		{ normal.x, normal.y, normal.z }, false)
-	if not ok and not orientWarned then
-		orientWarned = true
-		mod:logWarning("could not orient overlay marker: " .. tostring(err))
-	end
+	obj:lookAt({ px + fx / len, py + fy / len, pz + fz / len }, { normal.x, normal.y, normal.z }, false)
 end
 
 local emptyPrefab
@@ -166,8 +156,7 @@ local function setParticle(emitter)
 	emitter.ParticleSystem = pendingParticle
 end
 
--- Creates the marker for a planned shape at `key`. Errors propagate to the
--- caller's pcall.
+-- Creates the marker for a planned shape at `key`.
 local function createMarker(level, key, spec, stats)
 	local cx, cz = grid.coordsOf(key)
 	local x, z = (cx + 0.5) * CELL, (cz + 0.5) * CELL
@@ -189,22 +178,14 @@ local function createMarker(level, key, spec, stats)
 	emptyPrefab = emptyPrefab or foundation.findAsset(EMPTY_PREFAB)
 	local obj = level:createObject(emptyPrefab, { px, py, pz })
 	pendingParticle = "PATHHEAT_PS_" .. spec.band .. "_" .. spec.wi .. "_" .. spec.ai
-	local ok, err = pcall(obj.addComponent, obj, "COMP_PARTICLE_EMITTER", setParticle)
-	if not ok then
-		destroy(obj)
-		error(err, 0)
-	end
+	obj:addComponent("COMP_PARTICLE_EMITTER", setParticle)
 
 	-- The quad's long side is its sideways axis, so face across the heading.
 	local angle = (spec.hi - 1) * PathHeatmap.HEADING_STEP
 	orient(obj, px, py, pz, normal, -sin(angle), cos(angle))
 
-	local parented = pcall(obj.setParent, obj, state.container, true)
-	if not parented then
-		-- Loose markers are found by name on load instead.
-		pcall(function() obj.Name = LEGACY_MARKER_NAME end)
-	end
-	return obj, parented
+	obj:setParent(state.container, true)
+	return obj
 end
 
 local function sameSpec(a, b)
@@ -216,7 +197,7 @@ end
 -- and replaced or dropped ones are destroyed after that. job.step() returns
 -- true when done.
 function overlay.newReconcileJob(level, plan)
-	local job = { done = false, created = 0, destroyed = 0, failed = 0 }
+	local job = { done = false, created = 0, destroyed = 0 }
 	local stats = { mismatches = 0 }
 	local markers = state.markers
 
@@ -242,29 +223,19 @@ function overlay.newReconcileJob(level, plan)
 	end)
 
 	local createIndex, destroyIndex = 1, 1
-	local warned = false
 
 	function job.step()
 		if createIndex <= #toCreate then
 			local last = math.min(createIndex + cfg.CREATE_PER_FRAME - 1, #toCreate)
 			for i = createIndex, last do
 				local key = toCreate[i]
-				local ok, obj, parented = pcall(createMarker, level, key, plan[key], stats)
-				if ok then
-					markers[key] = { obj = obj, spec = plan[key], parented = parented }
-					job.created = job.created + 1
-				else
-					job.failed = job.failed + 1
-					if not warned then
-						warned = true
-						mod:logWarning("could not create overlay marker: " .. tostring(obj))
-					end
-				end
+				markers[key] = { obj = createMarker(level, key, plan[key], stats), spec = plan[key] }
 			end
+			job.created = job.created + (last - createIndex + 1)
 			createIndex = last + 1
 		elseif destroyIndex <= #toDestroy then
 			local last = math.min(destroyIndex + cfg.DESTROY_PER_FRAME - 1, #toDestroy)
-			for i = destroyIndex, last do destroy(toDestroy[i]) end
+			for i = destroyIndex, last do toDestroy[i]:destroy() end
 			job.destroyed = job.destroyed + (last - destroyIndex + 1)
 			destroyIndex = last + 1
 		else
