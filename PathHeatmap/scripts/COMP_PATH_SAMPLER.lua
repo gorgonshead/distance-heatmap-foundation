@@ -41,20 +41,6 @@ local function sampleCycle(managers)
 end
 
 -- Entrances ----------------------------------------------------------------------
-
--- The game's own marker for where villagers enter a building. Looser matches
--- ("door", "gate") also catch door model parts and attach nodes: a tax office
--- reported 31 "entrances" that way, and has two. No child carries the
--- engine's COMP_ENTRANCE_LOCATION, so the name is the only handle.
---
--- Checked in game and ruled out or kept for later:
--- - The part asset's BUILDING_PATH_DATA (EntranceList, WaypointPositionList) is
---   not readable from Lua: AssetBuilding.AssetCoreBuildingPart has no
---   BuildingPath field, and placed parts expose no asset.
--- - level:find(ENTRANCE_NAME, {}) fills a plain table with every indicator in
---   the level (932 in a 500-person village) in one call.
--- - Indicators sit directly under a part object (two levels below the
---   building), or five levels down in houses.
 local ENTRANCE_NAME = "Building Entrance Indicator"
 
 -- Events after which a building's entrances may have moved.
