@@ -1,7 +1,6 @@
 local mod = ...
 
--- Every tunable in one place. Scripts copy these into locals when they load,
--- so a change needs a mod reload (Ctrl+Shift+R) or a save reload.
+-- Every tunable in one place.
 --
 -- Per-frame budgets are counted in units of work.
 PathHeatmap.cfg = {
